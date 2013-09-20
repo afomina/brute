@@ -23,7 +23,7 @@ typedef enum {
 } run_mode_t;
 
 typedef struct queue_t {
-  password_t queue[QUEUE_SIZE];
+  password_t * queue[QUEUE_SIZE];
   int head;
   int tail;
   pthread_mutex_t * head_mutex;
@@ -42,7 +42,7 @@ void init (queue_t * q)
   sem_init (q->full, 0, 0);
 }
 
-void push (queue_t * q, password_t pass)
+void push (queue_t * q, password_t * pass)
 {
   sem_wait (q->empty);
   pthread_mutex_lock (q->tail_mutex);
@@ -80,6 +80,8 @@ typedef struct arg_t {
   handler_t handler;
 } arg_t;
 
+typedef void * (* func) (void *);
+
 int check_password (config_t * config, password_t password)
 {
   int status = !strcmp (crypt (password, config->hash), config->hash);
@@ -91,14 +93,28 @@ int check_password (config_t * config, password_t password)
   return (status);
 }
 
-int push_password (config_t * config, password_t password)
+int push_password (config_t * config, password_t * password)
 {
   push (config->q, password);
   return 0;
 }
 
-void brute_iter (config_t * config, int pass_len, handler_t handler)
+void * pop_password (void * arg_)
 {
+  arg_t * arg = (arg_t *) arg_;
+  config_t * config = arg->config;
+  password_t password;
+  pop (config->q, &password);
+  check_password (config, password);
+}
+
+void * brute_iter (void * arg_)
+{
+  arg_t * arg = (arg_t *) arg_;
+  config_t * config = arg->config;
+  int pass_len = arg->pass_len;
+  handler_t handler = arg->handler;
+
   password_t password;
   int alph_len_m1 = strlen (config->alph) - 1;
   int pos[MAX_LEN];
@@ -129,8 +145,13 @@ void brute_iter (config_t * config, int pass_len, handler_t handler)
     }
 }
 
-void brute_rec (config_t * config, int pass_len, handler_t handler)
+void * brute_rec (void * arg_)
 {
+  arg_t * arg = (arg_t *) arg_;
+  config_t * config = arg->config;
+  int pass_len = arg->pass_len;
+  handler_t handler = arg->handler;
+
   char password[MAX_LEN + 1];
   int alph_len = strlen (config->alph);
 
@@ -153,38 +174,38 @@ void brute_rec (config_t * config, int pass_len, handler_t handler)
   rec (0);
 }
 
-void multi_thread_brute (void * (* func) (void *), void * arg)
+void multi_thread_brute (func f, void * arg)
 {
   pthread_t thread;
-  pthread_create (&thread, NULL, func, arg);
+  pthread_create (&thread, NULL, f, arg);
 }
 
 void run_mode_selector (config_t * config, int pass_len)
 {
-  arg_t arg;
-  arg.config = config;
-  arg.pass_len = pass_len;
+  arg_t * arg;
+  arg->config = config;
+  arg->pass_len = pass_len;
 
   switch (config->run_mode)
     {
     case RM_SINGLE:
-      arg.handler = check_password;
-      brute_selector (&arg) (&arg);
+      arg->handler = check_password;
+      //brute_selector (arg) (arg);
       break;
     case RM_MULTI:      
-      arg.handler = push_password;
-      multi_thread_brute (&brute_selector, &arg);
+      arg->handler = push_password;
+      multi_thread_brute (brute_selector (arg), arg);
     }
 }
 
-void * brute_selector (arg_t * arg)
+int brute_selector (arg_t * arg)
 {
   switch (arg->config->brute_mode)
     {
     case BM_ITER:
-      return &brute_iter;
+      return brute_iter;
     case BM_REC:
-      return &brute_rec;
+      return brute_rec;
     }
 }
 
@@ -229,8 +250,8 @@ void parse_params (config_t * config, int argc, char * argv[])
 
 int main (int argc, char * argv[]) 
 {
-  queue_t * q_;
-  init (q_);
+  queue_t q;
+  init (&q);
 
   config_t config = {
     .brute_mode = BM_ITER,
@@ -238,7 +259,7 @@ int main (int argc, char * argv[])
     .hash = NULL,
     .max_n = MAX_LEN,
     .alph = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-    .q = q_;
+    .q = &q,
   };
 
   parse_params (&config, argc, argv);
@@ -248,9 +269,18 @@ int main (int argc, char * argv[])
       return (EXIT_FAILURE);
     }
 
-  //brute_all (&config);
-  pthread_t * thread1;
-  pthread_create (thread1, NULL, &brute_iter, );
+ //brute_all (&config);
+
+  arg_t arg;
+  arg.config = &config;
+  arg.pass_len = MAX_LEN;
+  arg.handler = push_password;
+ 
+  pthread_t thread1;
+  pthread_create (&thread1, NULL, &brute_iter, &arg);
+
+  pthread_t thread2;
+  pthread_create (&thread2, NULL, &pop_password, &arg);
   
   return (EXIT_SUCCESS);
 }
