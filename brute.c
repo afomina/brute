@@ -9,8 +9,14 @@
 
 #define MAX_LEN (4)
 #define QUEUE_SIZE (4)
+#define ALPH "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+#define THREAD_N (4)
 
 typedef char password_t[MAX_LEN + 1];
+
+typedef struct task_t {
+	password_t pass;
+} task_t;
 
 typedef enum {
   BM_ITER,
@@ -26,10 +32,10 @@ typedef struct queue_t {
   password_t queue[QUEUE_SIZE];
   int head;
   int tail;
-  pthread_mutex_t * head_mutex;
-  pthread_mutex_t * tail_mutex;
-  sem_t * empty;
-  sem_t * full;
+  pthread_mutex_t head_mutex;
+  pthread_mutex_t tail_mutex;
+  sem_t empty;
+  sem_t full;
 } queue_t;
 
 typedef struct config_t {
@@ -51,32 +57,32 @@ void queue_init (queue_t * q)
 {
   q->head = 0;
   q->tail = 0;
-  pthread_mutex_init (q->head_mutex, NULL);
-  pthread_mutex_init (q->tail_mutex, NULL);
-  sem_init (q->empty, 0, QUEUE_SIZE);
-  sem_init (q->full, 0, 0);
+  pthread_mutex_init (&q->head_mutex, NULL);
+  pthread_mutex_init (&q->tail_mutex, NULL);
+  sem_init (&q->empty, 0, QUEUE_SIZE);
+  sem_init (&q->full, 0, 0);
 }
 
-void queue_push (queue_t * q, password_t * pass)
+void queue_push (queue_t * q, task_t task)
 {
-  sem_wait (q->empty);
-  pthread_mutex_lock (q->tail_mutex);
-  *q->queue[q->tail] = pass;
+  sem_wait (&q->empty);
+  pthread_mutex_lock (&q->tail_mutex);
+  q->queue[q->tail] = task_t;
   if (++q->tail == sizeof (q->queue) / sizeof (q->queue[0]))
     q->tail = 0;
-  pthread_mutex_unlock (q->tail_mutex);
-  sem_post (q->full);
+  pthread_mutex_unlock (&q->tail_mutex);
+  sem_post (&q->full);
 }
 
-void queue_pop (queue_t * q, password_t * pass)
+void queue_pop (queue_t * q, task_t task)
 {
-  sem_wait (q->full);
-  pthread_mutex_lock (q->head_mutex);
-  pass = q->queue[q->head];
+  sem_wait (&q->full);
+  pthread_mutex_lock (&q->head_mutex);
+  task = q->queue[q->head];
   if (++q->head == sizeof (q->queue) / sizeof (q->queue[0]))
     q->head = 0;
-  pthread_mutex_unlock (q->head_mutex);
-  sem_post (q->empty);
+  pthread_mutex_unlock (&q->head_mutex);
+  sem_post (&q->empty);
 }
 
 int check_password (config_t * config, password_t password)
@@ -90,10 +96,22 @@ int check_password (config_t * config, password_t password)
   return status;
 }
 
-int push_password (config_t * config, password_t pass)
+int push_password (config_t * config, task_t task)
 {
-  queue_push(&config->q, &pass);
+  queue_push(&config->q, task);
   return 0;
+}
+
+void * consumer(void * args) {
+
+}
+
+void brute_multi (config_t * config) {
+	pthread_t threads[THREAD_N];
+	int i;
+	for (i = 0; i < THREAD_N; i++) {
+		pthread_create(&threads[i], NULL, &consumer, config);
+	}
 }
 
 int brute_iter (config_t * config, int pass_len, handler_t handler)
@@ -236,7 +254,7 @@ int main (int argc, char * argv[])
     .run_mode = RM_SINGLE,
     .hash = NULL,
     .max_n = MAX_LEN,
-    .alph = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    .alph = ALPH; 
   };
 
   parse_params (&config, argc, argv);
