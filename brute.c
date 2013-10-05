@@ -49,7 +49,7 @@ typedef struct config_t {
 } config_t;
 
 typedef int (*handler_t) (config_t *, password_t);
-typedef int (*brute) (config_t *, int, handler_t);
+typedef int (*brute_t) (config_t *, int, handler_t);
 
 typedef void * (* func) (void *);
 
@@ -102,18 +102,6 @@ int push_password (config_t * config, task_t task)
   return 0;
 }
 
-void * consumer(void * args) {
-
-}
-
-void brute_multi (config_t * config) {
-	pthread_t threads[THREAD_N];
-	int i;
-	for (i = 0; i < THREAD_N; i++) {
-		pthread_create(&threads[i], NULL, &consumer, config);
-	}
-}
-
 int brute_iter (config_t * config, int pass_len, handler_t handler)
 {
   password_t password;
@@ -132,18 +120,17 @@ int brute_iter (config_t * config, int pass_len, handler_t handler)
   while (true)
     {           
       if (handler (config, password))
-	return 1;
+	      return 1;
       //идем с конца и все 9ки заменяем на 0, (если вышли за границу то выход) первую не 9ку увеличиваем на 1
       for (j = pass_len - 1; (j >= 0) && (pos[j] == alph_len_m1); j--)
-	{
-	  pos[j] = 0;
-	  password[j] = config->alph[0];
-	}
+    	{
+	      pos[j] = 0;
+	      password[j] = config->alph[0];
+    	}
       if (j < 0)
-	{
-	  return 0;
-	}
-
+	    {
+	     return 0;
+	    }
       password[j] = config->alph[++pos[j]];
     }
 }
@@ -163,19 +150,13 @@ void * brute_rec (config_t * config, int pass_len, handler_t handler)
     int i;
     for (i = 0; i < alph_len; i++) 
       {
-	password[pos] = config->alph[i];
-	rec (pos + 1);
+    	password[pos] = config->alph[i];
+    	rec (pos + 1);
       }
   }
 
   password[pass_len] = 0;
   rec (0);
-}
-
-void multi_thread_brute (func f, void * arg)
-{
-  pthread_t thread;
-  pthread_create (&thread, NULL, f, arg);
 }
 
 handler_t run_mode_selector (config_t * config)
@@ -196,23 +177,42 @@ brute brute_selector (config_t * config)
     case BM_ITER:
        return brute_iter;
     case BM_REC:
-	return brute_rec;
+    	return brute_rec;
     }
 }
 
 void brute_all (config_t * config)
 {
-  brute func = brute_selector(config);
+  brute_t brute = brute_selector(config);
   handler_t handler = run_mode_selector(config);
   int i;
   for (i = 0; i <= config->max_n; ++i)
     {
-      func(config, i, handler);
+      brute(config, i, handler);
       if (config->found) 
-	return;
+	      return;
     }
   if (!config->found)
     printf("Password not found");
+}
+
+void * consumer(void * args) {
+  config_t * config = (config_t *) args;
+  task_t task;
+  while (true) {
+    queue_pop(&config->q, task);
+    if (check_password(config, task.password))
+      return;
+  }
+}
+
+void brute_multi (config_t * config) {
+	pthread_t threads[THREAD_N];
+	int i;
+	for (i = 0; i < THREAD_N; i++) {
+		pthread_create(&threads[i], NULL, &consumer, config);
+	}
+  brute_all(config);
 }
 
 void parse_params (config_t * config, int argc, char * argv[])
@@ -259,18 +259,19 @@ int main (int argc, char * argv[])
 
   parse_params (&config, argc, argv);
 
+  if (NULL == config.hash)
+  {
+    fprintf (stderr, "Hash missed!\n");
+    return (EXIT_FAILURE);
+  }
+
   if (config.run_mode == RM_MULTI)
   {
     queue_init (&config.q);
+    brute_multi(&config);
+  } else {
+    brute_all(&config);
   }
-
-  if (NULL == config.hash)
-    {
-      fprintf (stderr, "Hash missed!\n");
-      return (EXIT_FAILURE);
-    }
-
-  brute_all (&config);
 
   return (EXIT_SUCCESS);
 }
