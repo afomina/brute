@@ -10,12 +10,12 @@
 #define MAX_LEN (4)
 #define QUEUE_SIZE (4)
 #define ALPH "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-#define THREAD_N (4)
+#define THREAD_N (2)
 
 typedef char password_t[MAX_LEN + 1];
 
 typedef struct task_t {
-	password_t pass;
+	password_t password;
 } task_t;
 
 typedef enum {
@@ -29,7 +29,7 @@ typedef enum {
 } run_mode_t;
 
 typedef struct queue_t {
-  password_t queue[QUEUE_SIZE];
+  task_t queue[QUEUE_SIZE];
   int head;
   int tail;
   pthread_mutex_t head_mutex;
@@ -48,7 +48,7 @@ typedef struct config_t {
   queue_t q;
 } config_t;
 
-typedef int (*handler_t) (config_t *, password_t);
+typedef int (*handler_t) (config_t *, task_t);
 typedef int (*brute_t) (config_t *, int, handler_t);
 
 typedef void * (* func) (void *);
@@ -67,30 +67,30 @@ void queue_push (queue_t * q, task_t task)
 {
   sem_wait (&q->empty);
   pthread_mutex_lock (&q->tail_mutex);
-  q->queue[q->tail] = task_t;
+  q->queue[q->tail] = task;
   if (++q->tail == sizeof (q->queue) / sizeof (q->queue[0]))
     q->tail = 0;
   pthread_mutex_unlock (&q->tail_mutex);
   sem_post (&q->full);
 }
 
-void queue_pop (queue_t * q, task_t task)
+void queue_pop (queue_t * q, task_t * task)
 {
   sem_wait (&q->full);
   pthread_mutex_lock (&q->head_mutex);
-  task = q->queue[q->head];
+  *task = q->queue[q->head];
   if (++q->head == sizeof (q->queue) / sizeof (q->queue[0]))
     q->head = 0;
   pthread_mutex_unlock (&q->head_mutex);
   sem_post (&q->empty);
 }
 
-int check_password (config_t * config, password_t password)
+int check_password (config_t * config, task_t task)
 {
-  int status = !strcmp (crypt (password, config->hash), config->hash);
+  int status = !strcmp (crypt (task.password, config->hash), config->hash);
   if (status)
     {
-      printf ("password = '%s'\n", password);
+      printf ("password = '%s'\n", task.password);
       config->found = true;
     }
   return status;
@@ -104,59 +104,59 @@ int push_password (config_t * config, task_t task)
 
 int brute_iter (config_t * config, int pass_len, handler_t handler)
 {
-  password_t password;
+  task_t task;
   int alph_len_m1 = strlen (config->alph) - 1;
   int pos[MAX_LEN];
   int j;
 
-  password[pass_len] = 0;
+  task.password[pass_len] = 0;
 
   for (j = 0; j < pass_len; ++j)
     {
-      password[j] = config->alph[0];
+      task.password[j] = config->alph[0];
       pos[j] = 0;
     }
   
   while (true)
     {           
-      if (handler (config, password))
+      if (handler (config, task))
 	      return 1;
       //идем с конца и все 9ки заменяем на 0, (если вышли за границу то выход) первую не 9ку увеличиваем на 1
       for (j = pass_len - 1; (j >= 0) && (pos[j] == alph_len_m1); j--)
     	{
 	      pos[j] = 0;
-	      password[j] = config->alph[0];
+	      task.password[j] = config->alph[0];
     	}
       if (j < 0)
 	    {
 	     return 0;
 	    }
-      password[j] = config->alph[++pos[j]];
+      task.password[j] = config->alph[++pos[j]];
     }
 }
 
-void * brute_rec (config_t * config, int pass_len, handler_t handler)
+int brute_rec (config_t * config, int pass_len, handler_t handler)
 {
-  password_t password;
+  task_t task;
   int alph_len = strlen (config->alph);
 
-  void rec (int pos)
+  int rec (int pos)
   {
-    if (config->found) return;
+    if (config->found) 
+			return EXIT_SUCCESS;
     if (pos == pass_len) { 
-      handler (config, password);
-      return;
+      return handler (config, task);
     }
     int i;
     for (i = 0; i < alph_len; i++) 
       {
-    	password[pos] = config->alph[i];
+    	task.password[pos] = config->alph[i];
     	rec (pos + 1);
       }
   }
 
-  password[pass_len] = 0;
-  rec (0);
+  task.password[pass_len] = 0;
+  return rec (0);
 }
 
 handler_t run_mode_selector (config_t * config)
@@ -168,9 +168,10 @@ handler_t run_mode_selector (config_t * config)
     case RM_MULTI:      
       return push_password;
     }
+	return NULL;
 }
 
-brute brute_selector (config_t * config)
+brute_t brute_selector (config_t * config)
 {
   switch (config->brute_mode)
     {
@@ -179,6 +180,7 @@ brute brute_selector (config_t * config)
     case BM_REC:
     	return brute_rec;
     }
+	return NULL;
 }
 
 void brute_all (config_t * config)
@@ -193,17 +195,18 @@ void brute_all (config_t * config)
 	      return;
     }
   if (!config->found)
-    printf("Password not found");
+    printf("Password not found\n");
 }
 
 void * consumer(void * args) {
   config_t * config = (config_t *) args;
   task_t task;
   while (true) {
-    queue_pop(&config->q, task);
-    if (check_password(config, task.password))
-      return;
+    queue_pop(&config->q, &task);
+    if (check_password(config, task))
+			return NULL;
   }
+	return NULL;
 }
 
 void brute_multi (config_t * config) {
@@ -254,7 +257,7 @@ int main (int argc, char * argv[])
     .run_mode = RM_SINGLE,
     .hash = NULL,
     .max_n = MAX_LEN,
-    .alph = ALPH; 
+    .alph = ALPH
   };
 
   parse_params (&config, argc, argv);
