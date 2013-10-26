@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#define __USE_GNU
 #include <crypt.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -10,7 +11,7 @@
 #define MAX_LEN (4)
 #define QUEUE_SIZE (4)
 #define ALPH "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-#define THREAD_N (2)
+#define THREAD_N (4)
 
 typedef char password_t[MAX_LEN + 1];
 
@@ -45,11 +46,12 @@ typedef struct config_t {
   int max_n;
   char * alph;
   bool found;
+  password_t password;
   queue_t q;
 } config_t;
 
-typedef int (*handler_t) (config_t *, task_t);
-typedef int (*brute_t) (config_t *, int, handler_t);
+typedef int (*handler_t) (config_t *, task_t *, struct crypt_data *);
+typedef int (*brute_t) (config_t *, int, handler_t, struct crypt_data *);
 
 typedef void * (* func) (void *);
 
@@ -63,11 +65,11 @@ void queue_init (queue_t * q)
   sem_init (&q->full, 0, 0);
 }
 
-void queue_push (queue_t * q, task_t task)
+void queue_push (queue_t * q, task_t * task)
 {
   sem_wait (&q->empty);
   pthread_mutex_lock (&q->tail_mutex);
-  q->queue[q->tail] = task;
+  q->queue[q->tail] = *task;
   if (++q->tail == sizeof (q->queue) / sizeof (q->queue[0]))
     q->tail = 0;
   pthread_mutex_unlock (&q->tail_mutex);
@@ -85,24 +87,25 @@ void queue_pop (queue_t * q, task_t * task)
   sem_post (&q->empty);
 }
 
-int check_password (config_t * config, task_t task)
+int check_password (config_t * config, task_t * task, struct crypt_data * data)
 {
-  int status = !strcmp (crypt (task.password, config->hash), config->hash);
+  char * hashed_pass = crypt_r (task->password, config->hash, data);
+  int status = !strcmp (hashed_pass, config->hash);
   if (status)
     {
-      printf ("password = '%s'\n", task.password);
+      strcpy (config->password, task->password);
       config->found = true;
     }
   return status;
 }
 
-int push_password (config_t * config, task_t task)
+int push_password (config_t * config, task_t * task, struct crypt_data * data)
 {
   queue_push(&config->q, task);
-  return 0;
+  return config->found;
 }
 
-int brute_iter (config_t * config, int pass_len, handler_t handler)
+bool brute_iter (config_t * config, int pass_len, handler_t handler, struct crypt_data * data)
 {
   task_t task;
   int alph_len_m1 = strlen (config->alph) - 1;
@@ -119,8 +122,8 @@ int brute_iter (config_t * config, int pass_len, handler_t handler)
   
   while (true)
     {           
-      if (handler (config, task))
-	      return 1;
+      if (handler (config, &task, data))
+	    return true;
       //идем с конца и все 9ки заменяем на 0, (если вышли за границу то выход) первую не 9ку увеличиваем на 1
       for (j = pass_len - 1; (j >= 0) && (pos[j] == alph_len_m1); j--)
     	{
@@ -128,47 +131,34 @@ int brute_iter (config_t * config, int pass_len, handler_t handler)
 	      task.password[j] = config->alph[0];
     	}
       if (j < 0)
-	    {
-	     return 0;
-	    }
+        break;
       task.password[j] = config->alph[++pos[j]];
     }
+   return 0;
 }
 
-int brute_rec (config_t * config, int pass_len, handler_t handler)
+int brute_rec (config_t * config, int pass_len, handler_t handler, struct crypt_data * data)
 {
   task_t task;
   int alph_len = strlen (config->alph);
 
   int rec (int pos)
   {
-    if (config->found) 
-			return EXIT_SUCCESS;
     if (pos == pass_len) { 
-      return handler (config, task);
+      return handler (config, &task, data);
     }
     int i;
     for (i = 0; i < alph_len; i++) 
       {
     	task.password[pos] = config->alph[i];
-    	rec (pos + 1);
+    	if (rec (pos + 1))
+    	  return true;
       }
+      return false;
   }
 
   task.password[pass_len] = 0;
   return rec (0);
-}
-
-handler_t run_mode_selector (config_t * config)
-{
-  switch (config->run_mode)
-    {
-    case RM_SINGLE:
-      return check_password;
-    case RM_MULTI:      
-      return push_password;
-    }
-	return NULL;
 }
 
 brute_t brute_selector (config_t * config)
@@ -183,39 +173,45 @@ brute_t brute_selector (config_t * config)
 	return NULL;
 }
 
-void brute_all (config_t * config)
+void brute_all (config_t * config, handler_t handler, struct crypt_data * data)
 {
   brute_t brute = brute_selector(config);
-  handler_t handler = run_mode_selector(config);
   int i;
-  for (i = 0; i <= config->max_n; ++i)
+  
+  for (i = 1; i <= config->max_n; ++i)
     {
-      brute(config, i, handler);
-      if (config->found) 
-	      return;
+      if (brute(config, i, handler, data))
+        break;
     }
-  if (!config->found)
-    printf("Password not found\n");
 }
 
 void * consumer(void * args) {
+  struct crypt_data data;
+  data.initialized = 0;
   config_t * config = (config_t *) args;
   task_t task;
   while (true) {
     queue_pop(&config->q, &task);
-    if (check_password(config, task))
-			return NULL;
-  }
-	return NULL;
+    if (check_password(config, &task, &data))
+	  break;
+  } 
+  return NULL;
 }
 
 void brute_multi (config_t * config) {
 	pthread_t threads[THREAD_N];
+    queue_init (&config->q);
 	int i;
 	for (i = 0; i < THREAD_N; i++) {
 		pthread_create(&threads[i], NULL, &consumer, config);
 	}
-  brute_all(config);
+    brute_all(config, push_password, NULL);
+}
+
+void brute_single (config_t * config) {
+    struct crypt_data data;
+    data.initialized = 0;    
+    brute_all(config, check_password, &data);
 }
 
 void parse_params (config_t * config, int argc, char * argv[])
@@ -268,13 +264,19 @@ int main (int argc, char * argv[])
     return (EXIT_FAILURE);
   }
 
-  if (config.run_mode == RM_MULTI)
+  switch (config.run_mode)
   {
-    queue_init (&config.q);
-    brute_multi(&config);
-  } else {
-    brute_all(&config);
+    case RM_MULTI:
+      brute_multi(&config);
+      break;
+    case RM_SINGLE:
+      brute_single(&config);
+      break;
   }
+  if (config.found)
+    printf("Password '%s'\n", config.password);
+  else
+    printf("Password not found\n");
 
   return (EXIT_SUCCESS);
 }
