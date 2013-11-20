@@ -1,17 +1,19 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <sys/types.h>
 #include <string.h>
 #define __USE_GNU
 #include <crypt.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <regex.h>
 
 #define MAX_LEN (4)
 #define QUEUE_SIZE (4)
 #define ALPH "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-#define THREAD_N (4)
 
 typedef char password_t[MAX_LEN + 1];
 
@@ -198,14 +200,34 @@ void * consumer(void * args) {
   return NULL;
 }
 
+int get_proc_amount() {
+  FILE * file = fopen("/proc/cpuinfo", "r");
+  regex_t regex;
+  if (regcomp(&regex, "processor.*([0-9])", REG_EXTENDED)) {
+    printf("Regex error\n");
+    return EXIT_FAILURE;
+  }
+  regmatch_t pmatch[2];
+  char s[300];
+  int n = 0;
+  while (fgets(s, sizeof(s), file)) {
+    if (!regexec(&regex, s, 2, pmatch, 0)) {
+      n = atoi(&(s[pmatch[1].rm_so]));
+    }
+  }
+  fclose(file);
+  return n + 1;
+}
+
 void brute_multi (config_t * config) {
-	pthread_t threads[THREAD_N];
-    queue_init (&config->q);
-	int i;
-	for (i = 0; i < THREAD_N; i++) {
-		pthread_create(&threads[i], NULL, &consumer, config);
-	}
-    brute_all(config, push_password, NULL);
+  int n = get_proc_amount() + 1;
+  pthread_t threads[n];
+  queue_init (&config->q);
+    int i;
+    for (i = 0; i < n; i++) {
+      pthread_create(&threads[i], NULL, &consumer, config);
+    }
+  brute_all(config, push_password, NULL);
 }
 
 void brute_single (config_t * config) {
