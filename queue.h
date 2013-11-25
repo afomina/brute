@@ -1,6 +1,6 @@
 #include <pthread.h>
 
-#define QUEUE_SIZE (4)
+#define QUEUE_SIZE (10)
 #define MAX_LEN (4)
 
 typedef char password_t[MAX_LEN + 1];

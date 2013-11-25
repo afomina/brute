@@ -1,8 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <string.h>
 #define __USE_GNU
 #include <crypt.h>
@@ -11,8 +9,15 @@
 #include <semaphore.h>
 #include <regex.h>
 #include "queue.h"
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define ALPH "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+#define PORT 1234
+#define MAX_CON 10
+#define SERVER_IP INADDR_LOOPBACK
 
 typedef enum {
   BM_ITER,
@@ -35,14 +40,40 @@ typedef struct config_t {
   bool found;
   password_t password;
   queue_t q;
+  struct in_addr server_addr;
 } config_t;
 
-typedef int (*handler_t) (config_t *, task_t *, struct crypt_data *);
-typedef int (*brute_t) (config_t *, int, handler_t, struct crypt_data *);
 
+typedef bool (* handler_t) (config_t *, task_t *, struct crypt_data *);
+typedef int (* brute_t) (config_t *, int, handler_t, struct crypt_data *);
 typedef void * (* func) (void *);
 
-int check_password (config_t * config, task_t * task, struct crypt_data * data)
+typedef struct brute_data {
+  config_t * conf;
+  handler_t handler;
+  struct crypt_data * crypt;
+} brute_data;
+
+int get_proc_amount() {
+  FILE * file = fopen("/proc/cpuinfo", "r");
+  regex_t regex;
+  if (regcomp(&regex, "processor.*([0-9])", REG_EXTENDED)) {
+    fprintf(stderr, "Regex error\n");
+    return EXIT_FAILURE;
+  }
+  regmatch_t pmatch[2];
+  char s[300];
+  int n = 0;
+  while (fgets(s, sizeof(s), file)) {
+    if (!regexec(&regex, s, 2, pmatch, 0)) {
+      n = atoi(&(s[pmatch[1].rm_so]));
+    }
+  }
+  fclose(file);
+  return n + 1;
+}
+
+bool check_password (config_t * config, task_t * task, struct crypt_data * data)
 {
   char * hashed_pass = crypt_r (task->password, config->hash, data);
   int status = !strcmp (hashed_pass, config->hash);
@@ -54,7 +85,7 @@ int check_password (config_t * config, task_t * task, struct crypt_data * data)
   return status;
 }
 
-int push_password (config_t * config, task_t * task, struct crypt_data * data)
+bool push_password (config_t * config, task_t * task, struct crypt_data * data)
 {
   queue_push(&config->q, task);
   return config->found;
@@ -92,12 +123,12 @@ bool brute_iter (config_t * config, int pass_len, handler_t handler, struct cryp
   return 0;
 }
 
-int brute_rec (config_t * config, int pass_len, handler_t handler, struct crypt_data * data)
+bool brute_rec (config_t * config, int pass_len, handler_t handler, struct crypt_data * data)
 {
   task_t task;
   int alph_len = strlen (config->alph);
 
-  int rec (int pos)
+  bool rec (int pos)
   {
     if (pos == pass_len) { 
       return handler (config, &task, data);
@@ -128,6 +159,12 @@ brute_t brute_selector (config_t * config)
   return NULL;
 }
 
+void * thread_brute (void * arg) {
+  brute_data * data = (brute_data *) arg;
+  brute_all(data->conf, data->handler, data->crypt);
+  return NULL;
+}
+
 void brute_all (config_t * config, handler_t handler, struct crypt_data * data)
 {
   brute_t brute = brute_selector(config);
@@ -153,25 +190,6 @@ void * consumer(void * args) {
   return NULL;
 }
 
-int get_proc_amount() {
-  FILE * file = fopen("/proc/cpuinfo", "r");
-  regex_t regex;
-  if (regcomp(&regex, "processor.*([0-9])", REG_EXTENDED)) {
-    printf("Regex error\n");
-    return EXIT_FAILURE;
-  }
-  regmatch_t pmatch[2];
-  char s[300];
-  int n = 0;
-  while (fgets(s, sizeof(s), file)) {
-    if (!regexec(&regex, s, 2, pmatch, 0)) {
-      n = atoi(&(s[pmatch[1].rm_so]));
-    }
-  }
-  fclose(file);
-  return n + 1;
-}
-
 void brute_multi (config_t * config) {
   int n = get_proc_amount() + 1;
   pthread_t threads[n];
@@ -189,10 +207,73 @@ void brute_single (config_t * config) {
   brute_all(config, check_password, &data);
 }
 
+void server (config_t * conf) {
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) {
+    fprintf(stderr, "Socket error\n");
+    return;
+  }
+  struct socaddr_in addr;
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(PORT);
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (bind(sock, (struct socaddr *) &addr, sizeof(addr)) < 0) {
+    fprintf(stderr, "Bind error\n");
+    return;
+  }
+  
+  pthread_t th;
+  brute_data data = {
+    .conf = conf,
+    .handler = push_password,
+    .crypt = NULL
+  };
+  pthread_create(&th, NULL, &thread_brute, &data);
+  listen(sock, MAX_CON);
+  task_t task;
+  bool found;
+  while (true) {
+    int client = accept(sock, NULL, NULL);
+    queue_pop(&conf->q, &task);
+    send(client, &task, sizeof(task), 0);
+    recv(client, &found, sizeof(found), 0);
+    if (found) {
+      strcpy(conf->password, task.password); 
+      break;
+    }
+  } 
+  close(sock);
+}
+
+void brute_client (config_t * conf) {
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) {
+    fprintf(stderr, "Socket error\n");
+    return;
+  }
+  struct socaddr_in addr;
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(PORT);
+  addr.sin_addr.s_addr = conf->server_addr;
+  if (connect(sock, (struct socaddr *) &addr, sizeof(addr)) < 0) {
+    fprintf(stderr, "Connect error\n");
+    return;
+  }
+  task_t task;
+  while (true) {
+    recv(sock, &task, sizeof(task), 0);
+    bool status = check_password(conf, &task, NULL);
+    send(sock, &status, sizeof(status), 0);  
+    if (status)
+      break;
+  }
+  close(sock);
+}
+
 void parse_params (config_t * config, int argc, char * argv[])
 {
   int opt;
-  while ((opt = getopt(argc, argv, "irh:n:a:sm")) != -1)
+  while ((opt = getopt(argc, argv, "irh:n:a:1mc:s")) != -1)
   {
     switch (opt)
     {
@@ -211,11 +292,18 @@ void parse_params (config_t * config, int argc, char * argv[])
       case 'a':
         config->alph = optarg;
         break;
-      case 's':
+      case '1':
         config->run_mode = RM_SINGLE;
         break;
       case 'm':
         config->run_mode = RM_MULTI;
+        break;
+      case 's':
+        config->run_mode = RM_SERVER;
+        break;
+      case 'c':
+        config->run_mode = RM_CLIENT;
+        inet_aton(optarg, &config->server_addr);
         break;
     }
   }
@@ -246,6 +334,12 @@ int main (int argc, char * argv[])
       break;
     case RM_SINGLE:
       brute_single(&config);
+      break;
+    case RM_SERVER:
+      server(&config);
+      break;
+    case RM_CLIENT:
+      brute_client(&config);
       break;
   }
   if (config.found)
