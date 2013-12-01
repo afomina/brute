@@ -40,7 +40,7 @@ typedef struct config_t {
   bool found;
   password_t password;
   queue_t q;
-  struct in_addr server_addr;
+  in_addr_t server_addr;
 } config_t;
 
 
@@ -49,10 +49,15 @@ typedef int (* brute_t) (config_t *, int, handler_t, struct crypt_data *);
 typedef void * (* func) (void *);
 
 typedef struct brute_data {
-  config_t * conf;
+  config_t config;
   handler_t handler;
   struct crypt_data * crypt;
 } brute_data;
+
+typedef struct client_data {
+    config_t config;
+    int fd;
+} client_data;
 
 int get_proc_amount() {
   FILE * file = fopen("/proc/cpuinfo", "r");
@@ -161,7 +166,7 @@ brute_t brute_selector (config_t * config)
 
 void * thread_brute (void * arg) {
   brute_data * data = (brute_data *) arg;
-  brute_all(data->conf, data->handler, data->crypt);
+  brute_all(data->config, data->handler, data->crypt);
   return NULL;
 }
 
@@ -207,40 +212,61 @@ void brute_single (config_t * config) {
   brute_all(config, check_password, &data);
 }
 
+void * thread_client (void * arg) {
+    client_data * data = (client_data *) arg;
+    task_t task;
+    queue_pop(&data->config.q, &task);
+    send(data->fd, &task, sizeof(task), 0);
+    bool found;
+    recv(data->fd, &found, sizeof(found), 0);
+    if (found) {
+      strcpy(data->config.password, task.password); 
+    }
+}
+
 void server (config_t * conf) {
   int sock = socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) {
     fprintf(stderr, "Socket error\n");
     return;
   }
-  struct socaddr_in addr;
+  struct sockaddr_in addr;
   addr.sin_family = AF_INET;
   addr.sin_port = htons(PORT);
   addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  if (bind(sock, (struct socaddr *) &addr, sizeof(addr)) < 0) {
+  if (bind(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
     fprintf(stderr, "Bind error\n");
     return;
   }
+	printf("Address binded successfully\n");
   
   pthread_t th;
   brute_data data = {
-    .conf = conf,
+    .config = *conf,
     .handler = push_password,
     .crypt = NULL
   };
   pthread_create(&th, NULL, &thread_brute, &data);
   listen(sock, MAX_CON);
+	printf("Listen on port %d\n", PORT);
   task_t task;
   bool found;
   while (true) {
     int client = accept(sock, NULL, NULL);
-    queue_pop(&conf->q, &task);
+		printf("Client with fd %d accepted\n", client);
+    pthread_t client_thread;
+    client_data cl_data = {
+        .config = *conf,
+        .fd = client
+    };
+    pthread_create(&client_thread, NULL, &thread_client, &cl_data);
+    /*queue_pop(&conf->q, &task);
     send(client, &task, sizeof(task), 0);
     recv(client, &found, sizeof(found), 0);
     if (found) {
       strcpy(conf->password, task.password); 
       break;
-    }
+    }*/
   } 
   close(sock);
 }
@@ -251,11 +277,11 @@ void brute_client (config_t * conf) {
     fprintf(stderr, "Socket error\n");
     return;
   }
-  struct socaddr_in addr;
+  struct sockaddr_in addr;
   addr.sin_family = AF_INET;
   addr.sin_port = htons(PORT);
   addr.sin_addr.s_addr = conf->server_addr;
-  if (connect(sock, (struct socaddr *) &addr, sizeof(addr)) < 0) {
+  if (connect(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
     fprintf(stderr, "Connect error\n");
     return;
   }
@@ -303,7 +329,7 @@ void parse_params (config_t * config, int argc, char * argv[])
         break;
       case 'c':
         config->run_mode = RM_CLIENT;
-        inet_aton(optarg, &config->server_addr);
+        //inet_aton(optarg, &config->server_addr);
         break;
     }
   }
